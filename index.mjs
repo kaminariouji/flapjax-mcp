@@ -25,6 +25,7 @@ const RPCS = [
 
 const Q96 = 2n ** 96n
 const MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342n
+const MIN_SQRT_RATIO = 4295128739n
 
 const SEL = {
   slot0: '0x3850c7bd',
@@ -103,7 +104,7 @@ function analytic(Lraw, sqrtRaw) {
 async function quote(side, amountWei) {
   const tokenIn = side === 'buy' ? WBNB : FLAPJAX
   const tokenOut = side === 'buy' ? FLAPJAX : WBNB
-  const data = SEL.quoteExactInputSingle + encAddr(tokenIn) + encAddr(tokenOut) + pad(amountWei) + pad(FEE) + pad(MAX_SQRT_RATIO - 1n)
+  const data = SEL.quoteExactInputSingle + encAddr(tokenIn) + encAddr(tokenOut) + pad(amountWei) + pad(FEE) + pad(side === 'buy' ? MAX_SQRT_RATIO - 1n : MIN_SQRT_RATIO + 1n)
   const ret = await ethCall(QUOTER, data, `quote ${side}`)
   return words(ret)[0]
 }
