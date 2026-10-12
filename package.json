@@ -1,6 +1,6 @@
 {
   "name": "flapjax-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Read-only FLAPJAX on-chain state for agents — zero-dependency MCP server (BSC)",
   "type": "module",
   "main": "index.mjs",
