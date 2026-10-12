@@ -2,11 +2,16 @@
 // flapjax-mcp — zero-dependency MCP server (stdio) exposing read-only FLAPJAX on-chain state on BSC.
 // Reads only: eth_call / eth_getBalance / eth_blockNumber against public BSC RPCs. No keys, no writes.
 //
-// Tools: pool_state, depth, quote, treasury, check_address, info
+// Tools: pool_state, depth, quote, treasury, check_address, check_token, info
+//
+// check_token calls the FlapJax Agent/Wallet Checker (x402, Base mainnet) at
+// flapjax-check.run402.com. Free by default (payment terms + FJ credit balance);
+// the paid full check runs only if the MCP host itself provides FLAPJAX_X402_KEY
+// (the host's own wallet — this server never holds or reads any key by itself).
 //
 // Protocol: JSON-RPC 2.0 over stdio, newline-delimited. Logs go to stderr only.
 
-const VERSION = '1.0.0'
+const VERSION = '1.1.0'
 
 // ---- constants (BSC mainnet) ----
 const FLAPJAX = '0x90c8889f428F9Ebb77BB8f15CAD3a50a9aC680df'
@@ -216,6 +221,69 @@ async function tCheckAddress({ address }) {
   }
 }
 
+// ---- FlapJax Agent/Wallet Checker (x402, Base mainnet) ----
+const CHECKER = 'https://flapjax-check.run402.com'
+
+async function tCheckToken({ address }) {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(String(address || ''))) throw new Error('address must be 0x + 40 hex chars')
+  const out = { address, checker: CHECKER }
+
+  // Free call 1: FJ-credit balance for this wallet (also shows the FJ lane mechanics)
+  try {
+    const r = await fetch(`${CHECKER}/fj/balance?wallet=${address}`, { headers: { accept: 'application/json' } })
+    out.fj_credit = { status: r.status, body: await r.json() }
+  } catch (e) {
+    out.fj_credit = { error: String(e.message).slice(0, 160) }
+  }
+
+  // Free call 2: the live 402 payment terms for a full check (decoded from PAYMENT-REQUIRED)
+  try {
+    const r = await fetch(`${CHECKER}/check?address=${address}`)
+    out.full_check_http_status = r.status
+    const hdr = r.headers.get('payment-required')
+    if (hdr) {
+      const ch = JSON.parse(Buffer.from(hdr, 'base64').toString('utf8'))
+      const a = ch.accepts?.[0]
+      out.payment_terms = a
+        ? {
+            scheme: a.scheme,
+            network: a.network,
+            asset: a.asset,
+            amount_base_units: a.amount,
+            amount_usd: a.extra?.amount_usd_micros != null ? a.extra.amount_usd_micros / 1e6 : undefined,
+            pay_to: a.payTo,
+            max_timeout_seconds: a.maxTimeoutSeconds,
+            note: 'full check = agent-likeness score, sybil cluster flags, FLAPJAX holding, chain facts',
+          }
+        : null
+      out.example_output = ch.extensions?.bazaar?.info?.output?.example || null
+    }
+  } catch (e) {
+    out.payment_terms = { error: String(e.message).slice(0, 160) }
+  }
+
+  // Paid path — runs ONLY with the host's own key, provided via env by the MCP host.
+  // This server never bundles, stores, or reads a key on its own.
+  if (process.env.FLAPJAX_X402_KEY) {
+    try {
+      const { createSigner, wrapFetchWithPayment } = await import('x402-fetch')
+      const signer = await createSigner('base', process.env.FLAPJAX_X402_KEY)
+      const fetchWithPay = wrapFetchWithPayment(fetch, signer)
+      const r = await fetchWithPay(`${CHECKER}/check?address=${address}`)
+      out.paid_result = { status: r.status, body: await r.json() }
+    } catch (e) {
+      out.paid_result = {
+        error: `paid path needs the optional x402-fetch package and a funded Base wallet: ${String(e.message).slice(0, 200)}`,
+      }
+    }
+  } else {
+    out.paid_result = {
+      note: 'full paid check not attempted: set FLAPJAX_X402_KEY (the host wallet key, used locally to sign the x402 payment) or hold FJ credits. 1,000,000 FJ = 20 checks via the FJ lane.',
+    }
+  }
+  return out
+}
+
 function tInfo() {
   return {
     token: { symbol: 'FLAPJAX', contract: FLAPJAX, chain: 'BSC (56)', decimals: 18 },
@@ -276,6 +344,16 @@ const TOOLS = [
     },
   },
   {
+    name: 'check_token',
+    description: 'Call the FlapJax Agent/Wallet Checker (x402 on Base mainnet): free live payment terms (price, payTo, schema example) + the wallet\'s FJ-credit balance. If the host sets FLAPJAX_X402_KEY (its own wallet key), the full paid check runs too: agent-likeness score, sybil cluster flags, FLAPJAX holding, chain facts. 1,000,000 FLAPJAX = 20 checks via the FJ lane.',
+    inputSchema: {
+      type: 'object',
+      properties: { address: { type: 'string', description: '0x-prefixed EVM address to check' } },
+      required: ['address'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'info',
     description: 'Static reference: token/pool/treasury addresses, buyback program, known quirks, links.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
@@ -288,6 +366,7 @@ const HANDLERS = {
   quote: tQuote,
   treasury: tTreasury,
   check_address: tCheckAddress,
+  check_token: tCheckToken,
   info: tInfo,
 }
 
@@ -304,7 +383,7 @@ async function handle(msg) {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
         serverInfo: { name: 'flapjax-mcp', version: VERSION },
-        instructions: 'Read-only FLAPJAX on-chain reads on BSC (pool, depth, quotes, treasury, address checks). No keys, no writes.',
+        instructions: 'Read-only FLAPJAX on-chain reads on BSC (pool, depth, quotes, treasury, address checks) plus check_token, which calls the FlapJax x402 checker on Base (free terms + FJ credits; full paid check with the host\'s own FLAPJAX_X402_KEY). No keys held by the server, no writes.',
       },
     })
     return
